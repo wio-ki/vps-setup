@@ -23,9 +23,28 @@ echo "欢迎使用 VPS 自动配置脚本 v2.0，我们将按步骤进行设置�
 echo "---"
 
 # 步骤 2: 更新软件包列表并更新已安装软件
-echo ">> [1/8] 正在更新软件包列表并更新已安装软件..."
-apt update -y > /dev/null 2>&1
-apt upgrade -y > /dev/null 2>&1
+echo ">> [1/8] 正在更新软件包列表并更新已安装软件，请耐心等待..."
+
+# 设置非交互式模式，避免卡在确认界面
+export DEBIAN_FRONTEND=noninteractive
+
+echo "   - 正在更新软件包列表..."
+apt update -y
+
+echo "   - 正在更新已安装软件..."
+# 使用更安全的更新方式，避免卡在服务重启确认
+apt upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+
+# 如果有需要重启的服务，自动重启
+if [ -f /var/run/reboot-required ]; then
+    echo "   ⚠️  检测到系统更新需要重启才能完全生效"
+    echo "   - 建议在脚本执行完成后重启系统"
+fi
+
+# 清理不需要的包
+apt autoremove -y > /dev/null 2>&1
+apt autoclean > /dev/null 2>&1
+
 echo "✓ 系统更新完成。"
 
 # 步骤 3: 安装常用软件
@@ -33,6 +52,9 @@ echo "---"
 echo ">> [2/8] 正在安装常用软件..."
 apt install -y sudo curl wget nano vim > /dev/null 2>&1
 echo "✓ 常用软件安装完成。"
+
+# 重置环境变量
+unset DEBIAN_FRONTEND
 
 # 步骤 4: 设置时区
 echo "---"

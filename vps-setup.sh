@@ -2,7 +2,7 @@
 
 # ===============================================
 # VPS 一键配置和调优脚本 - 优化版
-# 版本：3.5
+# 版本：3.6
 # 主要改进：智能TCP调优算法、错误处理、性能检测
 # ===============================================
 
@@ -85,7 +85,7 @@ update_system() {
     log_info "系统更新完成"
 }
 
-# 模块 2: 安装常用工具
+# 2: 安装常用工具
 install_common_tools() {
     log_info "正在安装常用软件..."
     
@@ -100,7 +100,7 @@ install_common_tools() {
     log_info "常用软件安装完成"
 }
 
-# 模块 3: 设置系统时区
+# 3: 设置系统时区
 set_timezone() {
     log_info "正在设置系统时区为 Asia/Shanghai..."
     timedatectl set-timezone Asia/Shanghai
@@ -170,7 +170,6 @@ calculate_tcp_buffers() {
     local total_ram_mb=$3
     local cpu_cores=$4
     
-    # BDP计算 (Bandwidth-Delay Product)
     local bandwidth_bps=$((bandwidth_mbps * 1000 * 1000))
     local rtt_seconds=$(echo "scale=6; $rtt_ms / 1000" | bc -l)
     local bdp_bytes=$(echo "scale=0; ($bandwidth_bps * $rtt_seconds) / 8" | bc -l)
@@ -179,7 +178,6 @@ calculate_tcp_buffers() {
         bdp_bytes=1048576
     fi
     
-    # 内存限制 (TCP缓冲区不超过总内存的15%)
     local max_buffer_bytes=$((total_ram_mb * 1024 * 1024 * 15 / 100))
     
     local rmem_multiplier=4
@@ -223,7 +221,7 @@ calculate_tcp_buffers() {
     echo "$tcp_rmem_max $tcp_wmem_max $tcp_rmem_default $tcp_wmem_default $netdev_backlog $syn_backlog"
 }
 
-# 模块 4: 智能TCP调优
+# 4: 智能TCP调优
 intelligent_tcp_tuning() {
     log_info "正在进行智能TCP调优..."
     
@@ -241,37 +239,32 @@ intelligent_tcp_tuning() {
     
     local final_bandwidth_mbps=0
     
-    # 自动检测
-    if [ "$detected_bandwidth_mbps" -gt 0 ] && [ "$detected_bandwidth_mbps" -le 10000 ]; then
-        log_info "已自动检测到带宽：${detected_bandwidth_mbps}Mbps"
-        final_bandwidth_mbps=$detected_bandwidth_mbps
+    log_info "正在检测网络性能参数..."
+    log_info "  - 自动检测到的网卡速度：${detected_bandwidth_mbps}Mbps"
+    log_info "  - 平均延迟：${avg_rtt}ms"
+
+    echo ""
+    echo "请选择获取带宽的方式："
+    echo "1. 使用自动检测到的带宽 (${detected_bandwidth_mbps}Mbps) (默认)"
+    echo "2. 手动输入一个带宽值"
+    echo ""
+    read -p "请输入选择 [1/2] (回车默认选择1): " bandwidth_choice
+    
+    if [[ "$bandwidth_choice" == "2" ]]; then
+        while true; do
+            read -p "请输入您的VPS实际带宽值 (Mbps): " user_bandwidth
+            if [[ "$user_bandwidth" =~ ^[0-9]+$ ]] && [ "$user_bandwidth" -gt 0 ] && [ "$user_bandwidth" -le 10000 ]; then
+                final_bandwidth_mbps=$user_bandwidth
+                break
+            else
+                log_error "输入无效，请输入1-10000之间的整数"
+            fi
+        done
     else
-        log_warn "自动检测网卡速度失败或异常。"
-        echo ""
-        echo "请选择获取带宽的方式："
-        echo "1. 手动输入带宽值 (推荐)"
-        echo "2. 使用内存估算值 (${detected_bandwidth_mbps}Mbps)"
-        echo ""
-        read -p "请输入选择 [1/2] (默认1): " bandwidth_choice
-        
-        if [[ "$bandwidth_choice" == "2" ]]; then
-            final_bandwidth_mbps=$detected_bandwidth_mbps
-            log_info "已使用内存估算带宽：${final_bandwidth_mbps}Mbps"
-        else
-            while true; do
-                read -p "请输入您的VPS实际带宽值 (Mbps): " user_bandwidth
-                if [[ "$user_bandwidth" =~ ^[0-9]+$ ]] && [ "$user_bandwidth" -gt 0 ] && [ "$user_bandwidth" -le 10000 ]; then
-                    final_bandwidth_mbps=$user_bandwidth
-                    break
-                else
-                    log_error "输入无效，请输入1-10000之间的整数"
-                fi
-            done
-            log_info "已使用手动输入的带宽：${final_bandwidth_mbps}Mbps"
-        fi
+        final_bandwidth_mbps=$detected_bandwidth_mbps
     fi
     
-    log_info "网络参数: 带宽=${final_bandwidth_mbps}Mbps, 延迟=${avg_rtt}ms, 网卡=${network_interface:-auto}"
+    log_info "最终使用的带宽：${final_bandwidth_mbps}Mbps"
     
     local calculated_buffers=$(calculate_tcp_buffers "$final_bandwidth_mbps" "$avg_rtt" "$total_ram_mb" "$cpu_cores")
     local tcp_rmem_max=$(echo "$calculated_buffers" | awk '{print $1}')
@@ -282,10 +275,10 @@ intelligent_tcp_tuning() {
     local syn_backlog=$(echo "$calculated_buffers" | awk '{print $6}')
 
     log_info "智能计算的TCP参数:"
-    log_info "├─ 接收缓冲区: 4KB / $(echo "scale=0; $tcp_rmem_default/1024" | bc)KB / $(echo "scale=1; $tcp_rmem_max/1024/1024" | bc)MB"
-    log_info "├─ 发送缓冲区: 4KB / $(echo "scale=0; $tcp_wmem_default/1024" | bc)KB / $(echo "scale=1; $tcp_wmem_max/1024/1024" | bc)MB"
-    log_info "├─ 网络队列: $netdev_backlog"
-    log_info "└─ SYN队列: $syn_backlog"
+    log_info "  - 接收缓冲区: 4KB / $(echo "scale=0; $tcp_rmem_default/1024" | bc)KB / $(echo "scale=1; $tcp_rmem_max/1024/1024" | bc)MB"
+    log_info "  - 发送缓冲区: 4KB / $(echo "scale=0; $tcp_wmem_default/1024" | bc)KB / $(echo "scale=1; $tcp_wmem_max/1024/1024" | bc)MB"
+    log_info "  - 网络队列: $netdev_backlog"
+    log_info "  - SYN队列: $syn_backlog"
     
     cat <<EOF > /etc/sysctl.d/99-intelligent-tcp-tuning.conf
 # ===============================================
@@ -390,7 +383,7 @@ EOF
     log_info "调优信息已保存到 /var/log/tcp-tuning.log"
 }
 
-# 模块 5: 配置 Swap
+# 5: 配置 Swap
 configure_swap() {
     log_info "正在配置 Swap 交换分区..."
     
@@ -463,7 +456,7 @@ configure_swap() {
     log_info "Swap创建完成: $(free -m | grep Swap | awk '{print $2}')MB"
 }
 
-# 模块 6: SSH安全配置
+# 6: SSH安全配置
 configure_ssh_port() {
     log_info "正在配置SSH安全设置..."
     
@@ -508,7 +501,7 @@ configure_ssh_port() {
     fi
 }
 
-# 模块 7: 防火墙和安全配置
+# 7: 防火墙和安全配置
 configure_security() {
     log_info "正在配置Fail2ban安全防护..."
     
@@ -626,7 +619,7 @@ print_system_summary() {
 main_menu() {
     echo ""
     echo "================================================="
-    echo "          VPS 智能配置脚本 v3.5"
+    echo "          VPS 智能配置脚本 v3.6"
     echo "================================================="
     echo ""
     echo "请选择需要执行的操作："

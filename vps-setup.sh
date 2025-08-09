@@ -3,7 +3,7 @@
 # ===============================================
 # VPS 一键配置和调优脚本
 # 作者：改进版
-# 版本：2.4
+# 版本：2.8
 # ===============================================
 
 # 步骤 1: 检查是否以 root 用户运行，如果不是则切换
@@ -59,7 +59,7 @@ set_timezone() {
 intelligent_tcp_tuning() {
     echo "---"
     echo ">> [任务] 正在进行智能系统调优（BBR + FQ + 动态TCP缓冲区计算）..."
-
+    
     total_ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     total_ram_mb=$((total_ram_kb / 1024))
     cpu_cores=$(nproc)
@@ -100,13 +100,37 @@ intelligent_tcp_tuning() {
     echo ""
     echo ">> 正在计算最优TCP缓冲区参数..."
     final_bandwidth_mbps=$detected_bandwidth_mbps
+
+    # 如果网卡速度无法检测，提供手动输入或内存估算选项
     if [ "$final_bandwidth_mbps" -eq 0 ]; then
-        if [ $total_ram_mb -le 512 ]; then final_bandwidth_mbps=100;
-        elif [ $total_ram_mb -le 1024 ]; then final_bandwidth_mbps=200;
-        elif [ $total_ram_mb -le 4096 ]; then final_bandwidth_mbps=500;
-        else final_bandwidth_mbps=1000; fi
-        echo "  - 网卡速度未检测到，使用内存估算带宽：${final_bandwidth_mbps} Mbps"
+        echo "  - 无法自动检测到网卡速度。"
+        echo ""
+        echo "请选择获取带宽的方式："
+        echo "1. 手动输入带宽值（推荐使用 iperf3 的测速结果）"
+        echo "2. 使用内存大小进行估算"
+        echo ""
+        read -p "请输入您的选择 [1/2] (回车默认选择1): " bandwidth_choice
+        
+        if [[ "$bandwidth_choice" == "1" || "$bandwidth_choice" == "" ]]; then
+            while true; do
+                read -p "请输入您的VPS实际带宽值 (Mbps): " user_bandwidth
+                if [[ "$user_bandwidth" =~ ^[0-9]+$ ]] && [ "$user_bandwidth" -gt 0 ]; then
+                    final_bandwidth_mbps=$user_bandwidth
+                    break
+                else
+                    echo "输入无效，请输入一个大于 0 的整数。"
+                fi
+            done
+            echo "  - 已使用手动输入的带宽：${final_bandwidth_mbps} Mbps"
+        else
+            if [ $total_ram_mb -le 512 ]; then final_bandwidth_mbps=100;
+            elif [ $total_ram_mb -le 1024 ]; then final_bandwidth_mbps=200;
+            elif [ $total_ram_mb -le 4096 ]; then final_bandwidth_mbps=500;
+            else final_bandwidth_mbps=1000; fi
+            echo "  - 已使用内存估算带宽：${final_bandwidth_mbps} Mbps"
+        fi
     fi
+
     echo "  - 估算带宽：${final_bandwidth_mbps} Mbps"
     echo "  - 平均延迟：${avg_rtt} ms"
 
@@ -182,20 +206,19 @@ configure_swap() {
     if [ "$existing_swap" -gt 0 ]; then
         echo "检测到系统已有 ${existing_swap} MB 的 Swap，推荐大小为 ${recommended_swap} MB。"
         
-        # 即使现有Swap为推荐大小，也提供修改选项
         echo ""
-        echo "请选择："
-        echo "1. 否，保持现有 Swap 配置 [默认]"
-        echo "2. 是，移除现有 Swap 并创建推荐大小 (${recommended_swap} MB) 的新 Swap"
-        echo "3. 是，移除现有 Swap 并自定义新 Swap 大小"
-        echo ""
-        read -p "请输入选择 [1/2/3] (回车默认选择1): " swap_choice
+        read -p "当前Swap大小已为推荐值，是否要修改？[y/N] (回车默认不修改): " modify_swap
         
-        case "$swap_choice" in
-            2)
-                swap_size_mb=$recommended_swap
-                ;;
-            3)
+        if [[ "$modify_swap" == "y" || "$modify_swap" == "Y" ]]; then
+            echo ""
+            echo "请选择："
+            echo "1. 移除现有 Swap，创建推荐大小 (${recommended_swap} MB) 的新 Swap [默认]"
+            echo "2. 移除现有 Swap，自定义新 Swap 大小"
+            echo ""
+            read -p "请输入选择 [1/2] (回车默认选择1): " swap_choice
+            
+            swap_size_mb=0
+            if [[ "$swap_choice" == "2" ]]; then
                 while true; do
                     read -p "请输入自定义的 Swap 大小 (单位：MB): " custom_size
                     if [[ "$custom_size" =~ ^[0-9]+$ ]] && [ "$custom_size" -gt 0 ]; then
@@ -205,13 +228,14 @@ configure_swap() {
                         echo "输入无效，请输入一个大于 0 的整数。"
                     fi
                 done
-                ;;
-            1 | *)
-                echo "✓ 保持现有 Swap 配置，跳过修改。"
-                echo "当前 Swap 大小：$(free -m | grep "Swap:" | awk '{print $2}') MB"
-                return
-                ;;
-        esac
+            else
+                swap_size_mb=$recommended_swap
+            fi
+        else
+            echo "✓ 保持现有 Swap 配置，跳过修改。"
+            echo "当前 Swap 大小：$(free -m | grep "Swap:" | awk '{print $2}') MB"
+            return
+        fi
 
         echo ">> 正在移除现有 Swap 分区..."
         swapoff /swapfile > /dev/null 2>&1
@@ -222,6 +246,14 @@ configure_swap() {
         echo "当前 VPS 没有 Swap 交换分区。"
         echo "当前 VPS 的物理内存 (RAM) 为：${total_ram_mb} MB"
         echo "建议创建 Swap 大小：${recommended_swap} MB (RAM 的 2 倍)"
+        echo ""
+        read -p "是否创建 Swap？[Y/n] (回车默认创建): " create_swap_choice
+        
+        if [[ "$create_swap_choice" == "n" || "$create_swap_choice" == "N" ]]; then
+            echo "✓ 跳过创建 Swap。"
+            return
+        fi
+        
         echo ""
         echo "请选择："
         echo "1. 创建推荐大小的 Swap (${recommended_swap} MB) [默认]"
@@ -375,59 +407,63 @@ print_summary() {
 # ===============================================
 # 主菜单逻辑
 # ===============================================
-echo ""
-echo "---"
-echo "欢迎使用 VPS 自动配置脚本，请选择需要执行的操作："
-echo "1. 一键执行脚本所有内容（推荐）"
-echo "2. 更新软件包并安装常用软件"
-echo "3. 智能系统调优（TCP/BBR）"
-echo "4. 配置 Swap 交换分区"
-echo "5. 修改 SSH 端口"
-echo "6. 安装并配置 Fail2ban"
-echo "0. 退出脚本"
-echo "---"
-read -p "请输入您的选择 [1-6] (回车默认选择1): " choice
+main_menu() {
+    echo ""
+    echo "---"
+    echo "欢迎使用 VPS 自动配置脚本，请选择需要执行的操作："
+    echo "1. 一键执行脚本所有内容（推荐）"
+    echo "2. 更新软件包并安装常用软件"
+    echo "3. 智能系统调优（TCP调优/开启BBR/开启FQ）"
+    echo "4. 配置 Swap 交换分区"
+    echo "5. 修改 SSH 端口"
+    echo "6. 安装并配置 Fail2ban"
+    echo "0. 退出脚本"
+    echo "---"
+    read -p "请输入您的选择 [1-6] (回车默认选择1): " choice
 
-case "$choice" in
-    1 | "")
-        update_system
-        install_common_tools
-        set_timezone
-        intelligent_tcp_tuning
-        configure_swap
-        configure_ssh_port
-        configure_fail2ban
-        print_summary
-        ;;
-    2)
-        update_system
-        install_common_tools
-        echo "✓ 软件包更新和软件安装任务完成。"
-        ;;
-    3)
-        install_common_tools
-        intelligent_tcp_tuning
-        echo "✓ 智能TCP调优任务完成。"
-        ;;
-    4)
-        configure_swap
-        echo "✓ Swap 交换分区配置任务完成。"
-        ;;
-    5)
-        configure_ssh_port
-        echo "✓ SSH 端口配置任务完成。"
-        ;;
-    6)
-        configure_fail2ban
-        echo "✓ Fail2ban 配置任务完成。"
-        ;;
-    0)
-        echo "退出脚本，未执行任何操作。"
-        exit 0
-        ;;
-    *)
-        echo "无效的选择，请重新运行脚本并输入正确的选项。"
-        exit 1
-        ;;
-esac
+    case "$choice" in
+        1 | "")
+            update_system
+            install_common_tools
+            set_timezone
+            intelligent_tcp_tuning
+            configure_swap
+            configure_ssh_port
+            configure_fail2ban
+            print_summary
+            ;;
+        2)
+            update_system
+            install_common_tools
+            echo "✓ 软件包更新和软件安装任务完成。"
+            ;;
+        3)
+            install_common_tools
+            intelligent_tcp_tuning
+            echo "✓ 智能TCP调优任务完成。"
+            ;;
+        4)
+            configure_swap
+            echo "✓ Swap 交换分区配置任务完成。"
+            ;;
+        5)
+            configure_ssh_port
+            echo "✓ SSH 端口配置任务完成。"
+            ;;
+        6)
+            configure_fail2ban
+            echo "✓ Fail2ban 配置任务完成。"
+            ;;
+        0)
+            echo "退出脚本，未执行任何操作。"
+            exit 0
+            ;;
+        *)
+            echo "无效的选择，请重新运行脚本并输入正确的选项。"
+            exit 1
+            ;;
+    esac
+}
+
+main_menu
 

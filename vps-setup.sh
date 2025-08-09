@@ -2,7 +2,7 @@
 
 # ===============================================
 # VPS 一键配置和调优脚本 - 优化版
-# 版本：3.3
+# 版本：3.4
 # 主要改进：智能TCP调优算法、错误处理、性能检测
 # ===============================================
 
@@ -108,9 +108,8 @@ set_timezone() {
 }
 
 # 网络性能检测函数
+# 修复：移除函数内部的log输出，只返回纯数据
 detect_network_performance() {
-    log_info "正在进行网络性能检测..."
-    
     local detected_bandwidth=0
     local avg_rtt=50
     local network_interface=""
@@ -128,7 +127,6 @@ detect_network_performance() {
     done
     
     # 2. RTT检测 - 改进版本，更准确
-    log_debug "正在检测网络延迟..."
     local rtt_sum=0
     local rtt_count=0
     local test_targets=("8.8.8.8" "1.1.1.1" "223.5.5.5" "119.29.29.29")
@@ -150,20 +148,17 @@ detect_network_performance() {
         local total_ram_mb=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
         local cpu_cores=$(nproc)
         
-        # 根据VPS配置估算带宽
         if [ $total_ram_mb -le 512 ] && [ $cpu_cores -le 1 ]; then
-            detected_bandwidth=100  # 小型VPS
+            detected_bandwidth=100
         elif [ $total_ram_mb -le 1024 ] && [ $cpu_cores -le 2 ]; then
-            detected_bandwidth=200  # 中小型VPS
+            detected_bandwidth=200
         elif [ $total_ram_mb -le 2048 ] && [ $cpu_cores -le 4 ]; then
-            detected_bandwidth=500  # 中型VPS
+            detected_bandwidth=500
         elif [ $total_ram_mb -le 8192 ] && [ $cpu_cores -le 8 ]; then
-            detected_bandwidth=1000 # 大型VPS
+            detected_bandwidth=1000
         else
-            detected_bandwidth=2000 # 超大型VPS
+            detected_bandwidth=2000
         fi
-        
-        log_warn "无法检测网卡速度，基于配置估算: ${detected_bandwidth}Mbps"
     fi
     
     echo "$detected_bandwidth $avg_rtt $network_interface"
@@ -181,30 +176,23 @@ calculate_tcp_buffers() {
     local rtt_seconds=$(echo "scale=6; $rtt_ms / 1000" | bc -l)
     local bdp_bytes=$(echo "scale=0; ($bandwidth_bps * $rtt_seconds) / 8" | bc -l)
     
-    # 确保BDP合理
     if [ -z "$bdp_bytes" ] || [ "$bdp_bytes" -le 0 ]; then
-        bdp_bytes=1048576  # 默认1MB
+        bdp_bytes=1048576
     fi
-    
-    log_debug "BDP计算: ${bandwidth_mbps}Mbps x ${rtt_ms}ms = $(echo "scale=2; $bdp_bytes/1024/1024" | bc)MB"
     
     # 内存限制 (TCP缓冲区不超过总内存的15%)
     local max_buffer_bytes=$((total_ram_mb * 1024 * 1024 * 15 / 100))
     
-    # 接收缓冲区 = BDP x 倍数（根据网络类型调整）
     local rmem_multiplier=4
     if [ $bandwidth_mbps -ge 1000 ]; then
-        rmem_multiplier=6  # 高带宽网络需要更大缓冲区
+        rmem_multiplier=6
     elif [ $bandwidth_mbps -le 100 ]; then
-        rmem_multiplier=2  # 低带宽网络缓冲区可以小一些
+        rmem_multiplier=2
     fi
     
     local tcp_rmem_max=$((bdp_bytes * rmem_multiplier))
-    
-    # 发送缓冲区稍小于接收缓冲区
     local tcp_wmem_max=$((bdp_bytes * rmem_multiplier * 3 / 4))
     
-    # 应用内存限制
     if [ $tcp_rmem_max -gt $max_buffer_bytes ]; then
         tcp_rmem_max=$max_buffer_bytes
     fi
@@ -212,24 +200,20 @@ calculate_tcp_buffers() {
         tcp_wmem_max=$max_buffer_bytes
     fi
     
-    # 设置合理的最小值
-    local min_rmem=$((16 * 1024 * 1024))  # 16MB
-    local min_wmem=$((8 * 1024 * 1024))    # 8MB
+    local min_rmem=$((16 * 1024 * 1024))
+    local min_wmem=$((8 * 1024 * 1024))
     
     if [ $tcp_rmem_max -lt $min_rmem ]; then tcp_rmem_max=$min_rmem; fi
     if [ $tcp_wmem_max -lt $min_wmem ]; then tcp_wmem_max=$min_wmem; fi
     
-    # 默认缓冲区大小（连接建立时的初始值）
     local tcp_rmem_default=$((tcp_rmem_max / 4))
     local tcp_wmem_default=$((tcp_wmem_max / 4))
     
-    # 确保默认值在合理范围内
     if [ $tcp_rmem_default -lt 87380 ]; then tcp_rmem_default=87380; fi
     if [ $tcp_wmem_default -lt 65536 ]; then tcp_wmem_default=65536; fi
     if [ $tcp_rmem_default -gt 1048576 ]; then tcp_rmem_default=1048576; fi
     if [ $tcp_wmem_default -gt 524288 ]; then tcp_wmem_default=524288; fi
     
-    # 网络队列参数
     local netdev_backlog=$((2048 * cpu_cores))
     if [ $netdev_backlog -lt 4096 ]; then netdev_backlog=4096; fi
     if [ $netdev_backlog -gt 30000 ]; then netdev_backlog=30000; fi
@@ -251,7 +235,10 @@ intelligent_tcp_tuning() {
     
     log_info "VPS配置: ${total_ram_mb}MB内存, ${cpu_cores}核CPU @ ${cpu_freq}MHz"
     
-    read bandwidth_mbps avg_rtt network_interface <<< $(detect_network_performance)
+    local bandwidth_params=$(detect_network_performance)
+    local bandwidth_mbps=$(echo "$bandwidth_params" | awk '{print $1}')
+    local avg_rtt=$(echo "$bandwidth_params" | awk '{print $2}')
+    local network_interface=$(echo "$bandwidth_params" | awk '{print $3}')
     
     if [ $bandwidth_mbps -eq 0 ] || [ $bandwidth_mbps -gt 10000 ]; then
         log_warn "网络带宽检测异常，当前值: ${bandwidth_mbps}Mbps"
@@ -281,9 +268,14 @@ intelligent_tcp_tuning() {
     
     log_info "网络参数: 带宽=${bandwidth_mbps}Mbps, 延迟=${avg_rtt}ms, 网卡=${network_interface:-auto}"
     
-    read tcp_rmem_max tcp_wmem_max tcp_rmem_default tcp_wmem_default netdev_backlog syn_backlog <<< \
-        $(calculate_tcp_buffers $bandwidth_mbps $avg_rtt $total_ram_mb $cpu_cores)
-    
+    local calculated_buffers=$(calculate_tcp_buffers $bandwidth_mbps $avg_rtt $total_ram_mb $cpu_cores)
+    local tcp_rmem_max=$(echo "$calculated_buffers" | awk '{print $1}')
+    local tcp_wmem_max=$(echo "$calculated_buffers" | awk '{print $2}')
+    local tcp_rmem_default=$(echo "$calculated_buffers" | awk '{print $3}')
+    local tcp_wmem_default=$(echo "$calculated_buffers" | awk '{print $4}')
+    local netdev_backlog=$(echo "$calculated_buffers" | awk '{print $5}')
+    local syn_backlog=$(echo "$calculated_buffers" | awk '{print $6}')
+
     log_info "智能计算的TCP参数:"
     log_info "├─ 接收缓冲区: 4KB / $(echo "scale=0; $tcp_rmem_default/1024" | bc)KB / $(echo "scale=1; $tcp_rmem_max/1024/1024" | bc)MB"
     log_info "├─ 发送缓冲区: 4KB / $(echo "scale=0; $tcp_wmem_default/1024" | bc)KB / $(echo "scale=1; $tcp_wmem_max/1024/1024" | bc)MB"
@@ -629,20 +621,20 @@ print_system_summary() {
 main_menu() {
     echo ""
     echo "================================================="
-    echo "          VPS 智能配置脚本 v3.3"
+    echo "          VPS 智能配置脚本 v3.4"
     echo "================================================="
     echo ""
     echo "请选择需要执行的操作："
     echo ""
-    echo "  1. -> 一键完整配置 (推荐)"
-    echo "  2. -> 更新系统并安装工具"
-    echo "  3. -> 智能TCP网络优化"
-    echo "  4. -> 配置Swap交换分区"
-    echo "  5. -> SSH安全端口配置"
-    echo "  6. -> 安装Fail2ban防护"
-    echo "  7. -> 显示系统信息"
-    echo "  8. -> 性能优化建议"
-    echo "  0. -> 退出脚本"
+    echo "  1. 一键完整配置 (推荐)"
+    echo "  2. 更新系统并安装工具"
+    echo "  3. 智能TCP网络优化"
+    echo "  4. 配置Swap交换分区"
+    echo "  5. SSH安全端口配置"
+    echo "  6. 安装Fail2ban防护"
+    echo "  7. 显示系统信息"
+    echo "  8. 性能优化建议"
+    echo "  0. 退出脚本"
     echo ""
     echo "================================================="
     read -p "请输入选择 [0-8] (默认1): " choice

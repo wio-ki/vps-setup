@@ -1,6 +1,6 @@
 #!/bin/bash
 # VPS 初始化极简版
-# 版本: v3.6-lite
+# 版本: v3.6-swap-enhanced
 # 适用系统: Debian / Ubuntu / CentOS
 
 # 颜色
@@ -16,10 +16,15 @@ PLAIN="\033[0m"
 install_base() {
     echo -e "${YELLOW}正在安装常用工具...${PLAIN}"
     if [[ -f /etc/debian_version ]]; then
-        apt update -y && apt install -y curl wget vim ufw fail2ban
+        # Debian/Ubuntu
+        apt update -y
+        apt install -y curl wget vim ufw fail2ban iperf3
     elif [[ -f /etc/redhat-release ]]; then
+        # CentOS
         yum install -y epel-release
-        yum install -y curl wget vim ufw fail2ban
+        yum install -y curl wget vim fail2ban
+        # CentOS默认没有ufw，这里不安装
+        # 注意：CentOS的防火墙通常是firewalld或iptables
     fi
 }
 
@@ -31,17 +36,63 @@ enable_bbr_fq() {
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     sysctl -p
+    echo -e "${GREEN}BBR + FQ 已启用！${PLAIN}"
 }
 
-# 配置 Swap
+# 配置 Swap（自动判断并设置两倍RAM大小）
 setup_swap() {
-    read -p "请输入 swap 大小（例如 1G）: " swapsize
-    fallocate -l $swapsize /swapfile
+    # 获取内存大小（MB）
+    MEM_TOTAL_MB=$(free -m | awk '/^Mem:/ {print $2}')
+    # 计算期望的Swap大小（两倍内存），以MB为单位
+    SWAP_DESIRED_MB=$((MEM_TOTAL_MB * 2))
+    # 将MB转换为G，并向上取整，如果不足1G则按1G计算
+    SWAP_DESIRED_G=$(( (SWAP_DESIRED_MB + 1023) / 1024 ))
+    
+    echo -e "${YELLOW}正在检查 Swap 交换分区...${PLAIN}"
+
+    # 获取当前Swap大小（MB）
+    SWAP_CURRENT_MB=$(free -m | awk '/^Swap:/ {print $2}')
+    
+    # 检查是否存在Swap分区
+    if [[ $SWAP_CURRENT_MB -eq 0 ]]; then
+        echo -e "${YELLOW}未检测到 Swap 分区，将自动创建 ${SWAP_DESIRED_G}G Swap...${PLAIN}"
+    else
+        echo -e "${YELLOW}已检测到 Swap 分区，大小为 ${SWAP_CURRENT_MB}MB...${PLAIN}"
+        # 检查是否满足期望大小
+        if [[ $SWAP_CURRENT_MB -eq $SWAP_DESIRED_MB || $SWAP_CURRENT_MB -gt $SWAP_DESIRED_MB ]]; then
+            echo -e "${GREEN}Swap 大小 (${SWAP_CURRENT_MB}MB) 满足或大于期望值 (${SWAP_DESIRED_MB}MB)，跳过配置。${PLAIN}"
+            return 0
+        else
+            echo -e "${YELLOW}当前 Swap 大小 (${SWAP_CURRENT_MB}MB) 不满足期望值 (${SWAP_DESIRED_MB}MB)，将删除旧 Swap 并重新创建。${PLAIN}"
+            
+            # 删除旧的Swap
+            swapoff -a
+            # 找到 /etc/fstab 中配置的swapfile并删除
+            SWAP_FILE_PATH=$(grep -w swap /etc/fstab | awk '{print $1}')
+            if [[ -f $SWAP_FILE_PATH ]]; then
+                sed -i "/swap/d" /etc/fstab
+                rm -f $SWAP_FILE_PATH
+                echo -e "${YELLOW}旧的 Swap 文件 (${SWAP_FILE_PATH}) 已删除。${PLAIN}"
+            fi
+        fi
+    fi
+
+    # 创建新的Swap文件
+    echo -e "${YELLOW}正在创建新的 ${SWAP_DESIRED_G}G Swap 文件...${PLAIN}"
+    fallocate -l ${SWAP_DESIRED_G}G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile
     swapon /swapfile
+    
+    # 加入开机自启
     echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
-    echo -e "${GREEN}Swap 配置完成！${PLAIN}"
+    
+    # 调整 swappiness 和 vfs_cache_pressure
+    echo "vm.swappiness=10" >> /etc/sysctl.conf
+    echo "vm.vfs_cache_pressure=50" >> /etc/sysctl.conf
+    sysctl -p
+    
+    echo -e "${GREEN}Swap 配置完成！大小为 ${SWAP_DESIRED_G}G。${PLAIN}"
 }
 
 # SSH 安全端口配置
@@ -49,8 +100,19 @@ setup_ssh() {
     read -p "请输入新的 SSH 端口（建议 1024-65535）: " sshport
     sed -i "s/^#Port.*/Port $sshport/" /etc/ssh/sshd_config
     sed -i "s/^Port.*/Port $sshport/" /etc/ssh/sshd_config
-    systemctl restart sshd
-    ufw allow $sshport/tcp
+    
+    # 兼容不同的系统服务名
+    if [[ -f /etc/debian_version ]]; then
+        systemctl restart sshd
+        # UFW放行新端口
+        ufw allow $sshport/tcp
+    elif [[ -f /etc/redhat-release ]]; then
+        systemctl restart sshd
+        # CentOS使用firewalld
+        # firewalld命令示例
+        # firewall-cmd --zone=public --add-port=$sshport/tcp --permanent
+        # firewall-cmd --reload
+    fi
     echo -e "${GREEN}SSH 端口已修改为 $sshport 并放行防火墙！${PLAIN}"
 }
 
@@ -58,9 +120,22 @@ setup_ssh() {
 full_setup() {
     install_base
     enable_bbr_fq
-    setup_swap
+    setup_swap # 调用新版swap函数，无需手动输入
     setup_ssh
-    systemctl enable fail2ban --now
+    
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable fail2ban --now
+    fi
+    
+    # UFW防火墙配置
+    if command -v ufw >/dev/null 2>&1; then
+        echo -e "${YELLOW}配置 UFW 防火墙...${PLAIN}"
+        ufw enable
+        ufw default deny incoming
+        ufw default allow outgoing
+        ufw reload
+    fi
+    
     echo -e "${GREEN}一键配置完成！${PLAIN}"
 }
 

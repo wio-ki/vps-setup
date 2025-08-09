@@ -2,7 +2,7 @@
 
 # ===============================================
 # VPS 一键配置和调优脚本 - 优化版
-# 版本：3.0
+# 版本：3.5
 # 主要改进：智能TCP调优算法、错误处理、性能检测
 # ===============================================
 
@@ -19,16 +19,17 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_debug() { echo -e "${BLUE}[DEBUG]${NC} $1"; }
 
-# 错误处理
-set -euo pipefail
-trap 'log_error "脚本执行失败，行号: $LINENO"' ERR
+# 错误处理：在非交互式模式下，如果命令失败，脚本立即退出
+# set -euo pipefail
+# trap 'log_error "脚本执行失败，行号: $LINENO"' ERR
 
 # 步骤 1: 检查是否以 root 用户运行
 check_and_switch_to_root() {
     if [ "$EUID" -ne 0 ]; then
         log_info "当前用户不是 root，正在切换到 root 用户..."
+        # 传递所有参数给新的bash实例
         exec sudo su - root -c "bash $0 $*"
-        exit
+        exit 1
     fi
 }
 
@@ -108,8 +109,6 @@ set_timezone() {
 
 # 网络性能检测函数
 detect_network_performance() {
-    log_info "正在进行网络性能检测..."
-    
     local detected_bandwidth=0
     local avg_rtt=50
     local network_interface=""
@@ -117,7 +116,7 @@ detect_network_performance() {
     # 1. 检测网卡速度
     for interface in $(ls /sys/class/net/ | grep -E '^(eth|ens|enp|venet)'); do
         if [ -f "/sys/class/net/$interface/speed" ]; then
-            local speed=$(cat /sys/class/net/$interface/speed 2>/dev/null || echo "0")
+            local speed=$(cat "/sys/class/net/$interface/speed" 2>/dev/null || echo "0")
             if [ "$speed" != "-1" ] && [ "$speed" -gt 0 ]; then
                 detected_bandwidth=$speed
                 network_interface=$interface
@@ -127,7 +126,6 @@ detect_network_performance() {
     done
     
     # 2. RTT检测 - 改进版本，更准确
-    log_debug "正在检测网络延迟..."
     local rtt_sum=0
     local rtt_count=0
     local test_targets=("8.8.8.8" "1.1.1.1" "223.5.5.5" "119.29.29.29")
@@ -149,20 +147,17 @@ detect_network_performance() {
         local total_ram_mb=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
         local cpu_cores=$(nproc)
         
-        # 根据VPS配置估算带宽
         if [ $total_ram_mb -le 512 ] && [ $cpu_cores -le 1 ]; then
-            detected_bandwidth=100  # 小型VPS
+            detected_bandwidth=100
         elif [ $total_ram_mb -le 1024 ] && [ $cpu_cores -le 2 ]; then
-            detected_bandwidth=200  # 中小型VPS
+            detected_bandwidth=200
         elif [ $total_ram_mb -le 2048 ] && [ $cpu_cores -le 4 ]; then
-            detected_bandwidth=500  # 中型VPS
+            detected_bandwidth=500
         elif [ $total_ram_mb -le 8192 ] && [ $cpu_cores -le 8 ]; then
-            detected_bandwidth=1000 # 大型VPS
+            detected_bandwidth=1000
         else
-            detected_bandwidth=2000 # 超大型VPS
+            detected_bandwidth=2000
         fi
-        
-        log_warn "无法检测网卡速度，基于配置估算: ${detected_bandwidth}Mbps"
     fi
     
     echo "$detected_bandwidth $avg_rtt $network_interface"
@@ -180,30 +175,23 @@ calculate_tcp_buffers() {
     local rtt_seconds=$(echo "scale=6; $rtt_ms / 1000" | bc -l)
     local bdp_bytes=$(echo "scale=0; ($bandwidth_bps * $rtt_seconds) / 8" | bc -l)
     
-    # 确保BDP合理
     if [ -z "$bdp_bytes" ] || [ "$bdp_bytes" -le 0 ]; then
-        bdp_bytes=1048576  # 默认1MB
+        bdp_bytes=1048576
     fi
-    
-    log_debug "BDP计算: ${bandwidth_mbps}Mbps × ${rtt_ms}ms = $(echo "scale=2; $bdp_bytes/1024/1024" | bc)MB"
     
     # 内存限制 (TCP缓冲区不超过总内存的15%)
     local max_buffer_bytes=$((total_ram_mb * 1024 * 1024 * 15 / 100))
     
-    # 接收缓冲区 = BDP × 倍数（根据网络类型调整）
     local rmem_multiplier=4
     if [ $bandwidth_mbps -ge 1000 ]; then
-        rmem_multiplier=6  # 高带宽网络需要更大缓冲区
+        rmem_multiplier=6
     elif [ $bandwidth_mbps -le 100 ]; then
-        rmem_multiplier=2  # 低带宽网络缓冲区可以小一些
+        rmem_multiplier=2
     fi
     
     local tcp_rmem_max=$((bdp_bytes * rmem_multiplier))
-    
-    # 发送缓冲区稍小于接收缓冲区
     local tcp_wmem_max=$((bdp_bytes * rmem_multiplier * 3 / 4))
     
-    # 应用内存限制
     if [ $tcp_rmem_max -gt $max_buffer_bytes ]; then
         tcp_rmem_max=$max_buffer_bytes
     fi
@@ -211,24 +199,20 @@ calculate_tcp_buffers() {
         tcp_wmem_max=$max_buffer_bytes
     fi
     
-    # 设置合理的最小值
-    local min_rmem=$((16 * 1024 * 1024))  # 16MB
-    local min_wmem=$((8 * 1024 * 1024))   # 8MB
+    local min_rmem=$((16 * 1024 * 1024))
+    local min_wmem=$((8 * 1024 * 1024))
     
     if [ $tcp_rmem_max -lt $min_rmem ]; then tcp_rmem_max=$min_rmem; fi
     if [ $tcp_wmem_max -lt $min_wmem ]; then tcp_wmem_max=$min_wmem; fi
     
-    # 默认缓冲区大小（连接建立时的初始值）
     local tcp_rmem_default=$((tcp_rmem_max / 4))
     local tcp_wmem_default=$((tcp_wmem_max / 4))
     
-    # 确保默认值在合理范围内
     if [ $tcp_rmem_default -lt 87380 ]; then tcp_rmem_default=87380; fi
     if [ $tcp_wmem_default -lt 65536 ]; then tcp_wmem_default=65536; fi
     if [ $tcp_rmem_default -gt 1048576 ]; then tcp_rmem_default=1048576; fi
     if [ $tcp_wmem_default -gt 524288 ]; then tcp_wmem_default=524288; fi
     
-    # 网络队列参数
     local netdev_backlog=$((2048 * cpu_cores))
     if [ $netdev_backlog -lt 4096 ]; then netdev_backlog=4096; fi
     if [ $netdev_backlog -gt 30000 ]; then netdev_backlog=30000; fi
@@ -239,11 +223,10 @@ calculate_tcp_buffers() {
     echo "$tcp_rmem_max $tcp_wmem_max $tcp_rmem_default $tcp_wmem_default $netdev_backlog $syn_backlog"
 }
 
-# 模块 4: 智能TCP调优 - 完全重写
+# 模块 4: 智能TCP调优
 intelligent_tcp_tuning() {
     log_info "正在进行智能TCP调优..."
     
-    # 获取系统信息
     local total_ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     local total_ram_mb=$((total_ram_kb / 1024))
     local cpu_cores=$(nproc)
@@ -251,56 +234,65 @@ intelligent_tcp_tuning() {
     
     log_info "VPS配置: ${total_ram_mb}MB内存, ${cpu_cores}核CPU @ ${cpu_freq}MHz"
     
-    # 网络性能检测
-    read bandwidth_mbps avg_rtt network_interface <<< $(detect_network_performance)
+    local bandwidth_params=$(detect_network_performance)
+    local detected_bandwidth_mbps=$(echo "$bandwidth_params" | awk '{print $1}')
+    local avg_rtt=$(echo "$bandwidth_params" | awk '{print $2}')
+    local network_interface=$(echo "$bandwidth_params" | awk '{print $3}')
     
-    # 如果检测失败，提供手动输入选项
-    if [ $bandwidth_mbps -eq 0 ] || [ $bandwidth_mbps -gt 10000 ]; then
-        log_warn "网络带宽检测异常，当前值: ${bandwidth_mbps}Mbps"
+    local final_bandwidth_mbps=0
+    
+    # 自动检测
+    if [ "$detected_bandwidth_mbps" -gt 0 ] && [ "$detected_bandwidth_mbps" -le 10000 ]; then
+        log_info "已自动检测到带宽：${detected_bandwidth_mbps}Mbps"
+        final_bandwidth_mbps=$detected_bandwidth_mbps
+    else
+        log_warn "自动检测网卡速度失败或异常。"
         echo ""
         echo "请选择获取带宽的方式："
-        echo "1. 手动输入带宽值（推荐先用 speedtest-cli 或 iperf3 测速）"
-        echo "2. 使用保守估算值 (500Mbps)"
+        echo "1. 手动输入带宽值 (推荐)"
+        echo "2. 使用内存估算值 (${detected_bandwidth_mbps}Mbps)"
         echo ""
         read -p "请输入选择 [1/2] (默认1): " bandwidth_choice
         
         if [[ "$bandwidth_choice" == "2" ]]; then
-            bandwidth_mbps=500
-            log_info "使用保守估算带宽: ${bandwidth_mbps}Mbps"
+            final_bandwidth_mbps=$detected_bandwidth_mbps
+            log_info "已使用内存估算带宽：${final_bandwidth_mbps}Mbps"
         else
             while true; do
-                read -p "请输入实际带宽值 (Mbps, 建议先测速): " user_bandwidth
+                read -p "请输入您的VPS实际带宽值 (Mbps): " user_bandwidth
                 if [[ "$user_bandwidth" =~ ^[0-9]+$ ]] && [ "$user_bandwidth" -gt 0 ] && [ "$user_bandwidth" -le 10000 ]; then
-                    bandwidth_mbps=$user_bandwidth
+                    final_bandwidth_mbps=$user_bandwidth
                     break
                 else
-                    log_error "请输入1-10000之间的整数"
+                    log_error "输入无效，请输入1-10000之间的整数"
                 fi
             done
-            log_info "使用手动输入带宽: ${bandwidth_mbps}Mbps"
+            log_info "已使用手动输入的带宽：${final_bandwidth_mbps}Mbps"
         fi
     fi
     
-    log_info "网络参数: 带宽=${bandwidth_mbps}Mbps, 延迟=${avg_rtt}ms, 网卡=${network_interface:-auto}"
+    log_info "网络参数: 带宽=${final_bandwidth_mbps}Mbps, 延迟=${avg_rtt}ms, 网卡=${network_interface:-auto}"
     
-    # 计算最优TCP参数
-    read tcp_rmem_max tcp_wmem_max tcp_rmem_default tcp_wmem_default netdev_backlog syn_backlog <<< \
-        $(calculate_tcp_buffers $bandwidth_mbps $avg_rtt $total_ram_mb $cpu_cores)
-    
-    # 显示计算结果
+    local calculated_buffers=$(calculate_tcp_buffers "$final_bandwidth_mbps" "$avg_rtt" "$total_ram_mb" "$cpu_cores")
+    local tcp_rmem_max=$(echo "$calculated_buffers" | awk '{print $1}')
+    local tcp_wmem_max=$(echo "$calculated_buffers" | awk '{print $2}')
+    local tcp_rmem_default=$(echo "$calculated_buffers" | awk '{print $3}')
+    local tcp_wmem_default=$(echo "$calculated_buffers" | awk '{print $4}')
+    local netdev_backlog=$(echo "$calculated_buffers" | awk '{print $5}')
+    local syn_backlog=$(echo "$calculated_buffers" | awk '{print $6}')
+
     log_info "智能计算的TCP参数:"
     log_info "├─ 接收缓冲区: 4KB / $(echo "scale=0; $tcp_rmem_default/1024" | bc)KB / $(echo "scale=1; $tcp_rmem_max/1024/1024" | bc)MB"
     log_info "├─ 发送缓冲区: 4KB / $(echo "scale=0; $tcp_wmem_default/1024" | bc)KB / $(echo "scale=1; $tcp_wmem_max/1024/1024" | bc)MB"
     log_info "├─ 网络队列: $netdev_backlog"
     log_info "└─ SYN队列: $syn_backlog"
     
-    # 生成配置文件
     cat <<EOF > /etc/sysctl.d/99-intelligent-tcp-tuning.conf
 # ===============================================
 # 智能TCP调优配置
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 # VPS配置: ${total_ram_mb}MB RAM, ${cpu_cores}核CPU
-# 网络参数: ${bandwidth_mbps}Mbps带宽, ${avg_rtt}ms延迟
+# 网络参数: ${final_bandwidth_mbps}Mbps带宽, ${avg_rtt}ms延迟
 # ===============================================
 
 # ============= 核心算法配置 =============
@@ -311,8 +303,6 @@ net.ipv4.tcp_congestion_control = bbr
 # ============= 智能缓冲区配置 =============
 # 基于BDP(带宽×延迟)动态计算
 # 格式: 最小值 默认值 最大值
-
-# TCP套接字缓冲区
 net.ipv4.tcp_rmem = 4096 $tcp_rmem_default $tcp_rmem_max
 net.ipv4.tcp_wmem = 4096 $tcp_wmem_default $tcp_wmem_max
 
@@ -357,7 +347,6 @@ net.ipv4.tcp_rfc1337 = 1
 net.ipv4.tcp_slow_start_after_idle = 0
 
 # 拥塞窗口优化
-net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_notsent_lowat = 16384
 
 # ============= 安全优化 =============
@@ -365,17 +354,14 @@ net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 net.ipv4.conf.all.secure_redirects = 0
 net.ipv4.conf.default.secure_redirects = 0
-
 EOF
 
-    # 应用配置
     if sysctl --system > /dev/null 2>&1; then
         log_info "TCP优化配置已成功应用"
     else
         log_warn "配置应用时出现警告，但主要参数已生效"
     fi
     
-    # 验证配置
     local current_bbr=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
     local current_fq=$(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}')
     
@@ -385,14 +371,13 @@ EOF
         log_warn "TCP优化可能未完全生效，请重启后检查"
     fi
     
-    # 保存调优信息
     cat > /var/log/tcp-tuning.log <<EOF
 TCP调优记录 - $(date)
 ========================================
 系统信息:
 - 内存: ${total_ram_mb}MB
 - CPU: ${cpu_cores}核 @ ${cpu_freq}MHz
-- 网络: ${bandwidth_mbps}Mbps, ${avg_rtt}ms延迟
+- 网络: ${final_bandwidth_mbps}Mbps, ${avg_rtt}ms延迟
 
 缓冲区配置:
 - 接收缓冲区最大: $(echo "scale=1; $tcp_rmem_max/1024/1024" | bc)MB
@@ -402,7 +387,6 @@ TCP调优记录 - $(date)
 
 配置文件: /etc/sysctl.d/99-intelligent-tcp-tuning.conf
 EOF
-
     log_info "调优信息已保存到 /var/log/tcp-tuning.log"
 }
 
@@ -414,21 +398,27 @@ configure_swap() {
     local recommended_swap=$((total_ram_mb > 4096 ? total_ram_mb : total_ram_mb * 2))
     local existing_swap=$(free -m | grep "Swap:" | awk '{print $2}')
     
-    if [ $existing_swap -gt 0 ]; then
+    if [ "$existing_swap" -gt 0 ]; then
         log_info "检测到现有Swap: ${existing_swap}MB，推荐: ${recommended_swap}MB"
         
-        if [ $existing_swap -eq $recommended_swap ]; then
-            log_info "当前Swap大小已为推荐值，跳过配置"
-            return
+        # 即使现有Swap为推荐大小，也提供修改选项
+        local default_action="保持现有Swap"
+        if [ "$existing_swap" -eq "$recommended_swap" ]; then
+            log_info "当前Swap大小已为推荐值。"
+            read -p "是否重新配置Swap？[y/N] (默认N): " modify_swap
+            if [[ "$modify_swap" != [yY] ]]; then
+                log_info "保持现有Swap配置"
+                return
+            fi
+        else
+            log_info "当前Swap大小与推荐值不符。"
+            read -p "是否重新配置Swap？[y/N] (默认y): " modify_swap
+            if [[ "$modify_swap" != [yY] ]]; then
+                log_info "保持现有Swap配置"
+                return
+            fi
         fi
-        
-        read -p "是否重新配置Swap？[y/N]: " modify_swap
-        if [[ "$modify_swap" != [yY] ]]; then
-            log_info "保持现有Swap配置"
-            return
-        fi
-        
-        # 移除现有Swap
+
         log_info "正在移除现有Swap..."
         swapoff /swapfile 2>/dev/null || true
         rm -f /swapfile
@@ -442,7 +432,6 @@ configure_swap() {
         fi
     fi
     
-    # 获取用户确认的Swap大小
     echo "推荐Swap大小: ${recommended_swap}MB"
     read -p "请输入Swap大小(MB) [默认${recommended_swap}]: " swap_size
     swap_size=${swap_size:-$recommended_swap}
@@ -452,26 +441,22 @@ configure_swap() {
         return
     fi
     
-    # 检查磁盘空间
     local available_space=$(df / | tail -1 | awk '{print int($4/1024)}')
     if [ $available_space -lt $swap_size ]; then
         log_error "磁盘空间不足，需要${swap_size}MB，可用${available_space}MB"
         return
     fi
     
-    # 创建Swap
     log_info "正在创建 ${swap_size}MB Swap文件..."
     fallocate -l ${swap_size}M /swapfile
     chmod 600 /swapfile
     mkswap /swapfile > /dev/null
     swapon /swapfile
     
-    # 添加到fstab
     if ! grep -q "/swapfile" /etc/fstab; then
         echo "/swapfile none swap sw 0 0" >> /etc/fstab
     fi
     
-    # 设置swappiness
     echo "vm.swappiness=10" > /etc/sysctl.d/99-swap.conf
     sysctl vm.swappiness=10
     
@@ -499,17 +484,14 @@ configure_ssh_port() {
         log_error "请输入1024-65535范围内的端口号"
     done
     
-    # 备份SSH配置
     cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%Y%m%d_%H%M%S)"
     
-    # 修改端口配置
     if grep -q "^Port" /etc/ssh/sshd_config; then
         sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
     else
         echo "Port $new_port" >> /etc/ssh/sshd_config
     fi
     
-    # 测试SSH配置
     if sshd -t; then
         systemctl restart sshd
         log_info "SSH端口已修改为 $new_port"
@@ -530,32 +512,26 @@ configure_ssh_port() {
 configure_security() {
     log_info "正在配置Fail2ban安全防护..."
     
-    # 安装fail2ban
     if ! command -v fail2ban-server >/dev/null 2>&1; then
         if [ "$PKG_MANAGER" = "apt" ]; then
-            apt install -y fail2ban iptables-persistent
+            apt install -y fail2ban iptables-persistent >/dev/null 2>&1
         elif [ "$PKG_MANAGER" = "yum" ]; then
-            yum install -y epel-release
-            yum install -y fail2ban iptables-services
+            yum install -y epel-release >/dev/null 2>&1
+            yum install -y fail2ban iptables-services >/dev/null 2>&1
         fi
         log_info "Fail2ban安装完成"
     else
         log_info "Fail2ban已安装"
     fi
     
-    # 获取SSH端口
     local ssh_port=$(grep "^Port" /etc/ssh/sshd_config | awk '{print $2}' 2>/dev/null || echo "22")
     
-    # 创建jail.local配置
     cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
-# 基本设置
 bantime = 1d
 findtime = 10m
 maxretry = 5
 ignoreip = 127.0.0.1/8 ::1
-
-# 动作配置
 banaction = iptables-multiport
 banaction_allports = iptables-allports
 
@@ -563,40 +539,19 @@ banaction_allports = iptables-allports
 enabled = true
 port = $ssh_port
 filter = sshd
+backend = auto
 logpath = /var/log/auth.log
 maxretry = 3
 findtime = 600
 bantime = 3600
-
-[nginx-http-auth]
-enabled = false
-port = http,https
-filter = nginx-http-auth
-
-[nginx-noscript]
-enabled = false
-port = http,https
-filter = nginx-noscript
-
-[nginx-badbots]
-enabled = false
-port = http,https
-filter = nginx-badbots
-
-[nginx-noproxy]
-enabled = false
-port = http,https
-filter = nginx-noproxy
 EOF
 
-    # 启动服务
-    systemctl enable fail2ban
+    systemctl enable fail2ban > /dev/null 2>&1
     systemctl restart fail2ban
     sleep 2
     
     log_info "Fail2ban配置完成"
     
-    # 显示状态
     if systemctl is-active --quiet fail2ban; then
         log_info "Fail2ban状态: $(systemctl is-active fail2ban)"
         fail2ban-client status 2>/dev/null || true
@@ -610,33 +565,33 @@ show_optimization_tips() {
     log_info "性能优化建议:"
     echo ""
     echo "1. 网络测试命令:"
-    echo "   # 带宽测试"
-    echo "   wget -O /dev/null http://speedtest.tele2.net/100MB.zip"
-    echo "   # iperf3测试"
-    echo "   服务器端: iperf3 -s"
-    echo "   客户端: iperf3 -c 服务器IP -t 30 -P 4"
+    echo "    # 带宽测试"
+    echo "    wget -O /dev/null http://speedtest.tele2.net/100MB.zip"
+    echo "    # iperf3测试"
+    echo "    服务器端: iperf3 -s"
+    echo "    客户端: iperf3 -c 服务器IP -t 30 -P 4"
     echo ""
     echo "2. TCP状态监控:"
-    echo "   # 查看连接状态"
-    echo "   ss -tuln"
-    echo "   # 监控重传"
-    echo "   watch -n 1 'cat /proc/net/netstat | grep TcpExt'"
-    echo "   # 查看拥塞窗口"
-    echo "   ss -i"
+    echo "    # 查看连接状态"
+    echo "    ss -tuln"
+    echo "    # 监控重传"
+    echo "    watch -n 1 'cat /proc/net/netstat | grep TcpExt'"
+    echo "    # 查看拥塞窗口"
+    echo "    ss -i"
     echo ""
     echo "3. 系统性能监控:"
-    echo "   # 实时监控"
-    echo "   htop"
-    echo "   # 网络IO监控"
-    echo "   nethogs"
-    echo "   # 磁盘IO监控" 
-    echo "   iotop"
+    echo "    # 实时监控"
+    echo "    htop"
+    echo "    # 网络IO监控"
+    echo "    nethogs"
+    echo "    # 磁盘IO监控"  
+    echo "    iotop"
     echo ""
     echo "4. 配置文件位置:"
-    echo "   - TCP优化: /etc/sysctl.d/99-intelligent-tcp-tuning.conf"
-    echo "   - 调优日志: /var/log/tcp-tuning.log"
-    echo "   - SSH配置: /etc/ssh/sshd_config"
-    echo "   - Fail2ban: /etc/fail2ban/jail.local"
+    echo "    - TCP优化: /etc/sysctl.d/99-intelligent-tcp-tuning.conf"
+    echo "    - 调优日志: /var/log/tcp-tuning.log"
+    echo "    - SSH配置: /etc/ssh/sshd_config"
+    echo "    - Fail2ban: /etc/fail2ban/jail.local"
 }
 
 # 系统信息总结
@@ -671,7 +626,7 @@ print_system_summary() {
 main_menu() {
     echo ""
     echo "================================================="
-    echo "         VPS 智能配置脚本 v3.0"
+    echo "          VPS 智能配置脚本 v3.5"
     echo "================================================="
     echo ""
     echo "请选择需要执行的操作："
@@ -713,7 +668,7 @@ main_menu() {
             ;;
         3)
             detect_system
-            install_common_tools  # 确保bc等工具可用
+            install_common_tools
             intelligent_tcp_tuning
             log_info "TCP网络优化完成"
             ;;
@@ -751,29 +706,4 @@ main_menu() {
 # ===============================================
 # 脚本入口
 # ===============================================
-
-# 显示脚本信息
-echo "VPS智能配置脚本 v3.0 - 启动中..."
-echo "当前时间: $(date '+%Y-%m-%d %H:%M:%S')"
-echo "执行用户: $(whoami)"
-echo "系统负载: $(uptime | awk -F'load average:' '{print $2}')"
-
-# 检查依赖
-check_dependencies() {
-    local missing_deps=()
-    local required_commands="ping bc awk sed grep"
-    
-    for cmd in $required_commands; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing_deps+=("$cmd")
-        fi
-    done
-    
-    if [ ${#missing_deps[@]} -gt 0 ]; then
-        log_warn "缺少依赖工具: ${missing_deps[*]}"
-        log_info "将在安装阶段自动安装所需工具"
-    fi
-}
-
-check_dependencies
 main_menu

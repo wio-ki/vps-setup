@@ -3,7 +3,7 @@
 # ===============================================
 # VPS 一键配置和调优脚本
 # 作者：改进版
-# 版本：2.0
+# 版本：2.1
 # ===============================================
 
 # 步骤 1: 检查是否以 root 用户运行，如果不是则切换
@@ -19,7 +19,7 @@ check_and_switch_to_root() {
 check_and_switch_to_root
 
 echo "---"
-echo "欢迎使用 VPS 自动配置脚本 v2.0，我们将按步骤进行设置。"
+echo "欢迎使用 VPS 自动配置脚本 v2.1，我们将按步骤进行设置。"
 echo "---"
 
 # 步骤 2: 更新软件包列表并更新已安装软件
@@ -28,17 +28,17 @@ echo ">> [1/8] 正在更新软件包列表并更新已安装软件，请耐心�
 # 设置非交互式模式，避免卡在确认界面
 export DEBIAN_FRONTEND=noninteractive
 
-echo "   - 正在更新软件包列表..."
+echo "    - 正在更新软件包列表..."
 apt update -y
 
-echo "   - 正在更新已安装软件..."
+echo "    - 正在更新已安装软件..."
 # 使用更安全的更新方式，避免卡在服务重启确认
 apt upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
 # 如果有需要重启的服务，自动重启
 if [ -f /var/run/reboot-required ]; then
-    echo "   ⚠️  检测到系统更新需要重启才能完全生效"
-    echo "   - 建议在脚本执行完成后重启系统"
+    echo "    ⚠️  检测到系统更新需要重启才能完全生效"
+    echo "    - 建议在脚本执行完成后重启系统"
 fi
 
 # 清理不需要的包
@@ -197,15 +197,69 @@ echo "当前队列调度算法：$(sysctl net.core.default_qdisc | awk '{print $
 echo "---"
 echo ">> [5/8] 准备创建 Swap 交换分区..."
 
+# 获取VPS配置信息
+total_ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+total_ram_mb=$((total_ram_kb / 1024))
+recommended_swap=$((total_ram_mb * 2))
+
 # 检查是否已有swap
 existing_swap=$(free -m | grep "Swap:" | awk '{print $2}')
-if [ "$existing_swap" -gt 0 ]; then
-    echo "检测到系统已有 ${existing_swap} MB 的 Swap，跳过创建。"
+existing_swap_kb=$(free | grep "Swap:" | awk '{print $2}')
+
+# 根据用户需求修改逻辑：如果已有Swap，但大小不等于推荐值，则询问用户
+if [ "$existing_swap_kb" -gt 0 ]; then
+    if [ "$existing_swap" -ne "$recommended_swap" ]; then
+        echo "检测到系统已有 ${existing_swap} MB 的 Swap，但建议大小为 ${recommended_swap} MB。"
+        echo "请选择："
+        echo "1. 移除现有 Swap，创建推荐大小 (${recommended_swap} MB) 的新 Swap [默认]"
+        echo "2. 移除现有 Swap，自定义新 Swap 大小"
+        echo ""
+        read -p "请输入选择 [1/2] (回车默认选择1): " swap_choice
+        
+        swap_size_mb=0
+        if [[ "$swap_choice" == "2" ]]; then
+            while true; do
+                read -p "请输入自定义的 Swap 大小 (单位：MB): " custom_size
+                if [[ "$custom_size" =~ ^[0-9]+$ ]] && [ "$custom_size" -gt 0 ]; then
+                    swap_size_mb=$custom_size
+                    break
+                else
+                    echo "输入无效，请输入一个大于 0 的整数。"
+                fi
+            done
+        else
+            swap_size_mb=$recommended_swap
+        fi
+        
+        echo ">> 正在移除现有 Swap 分区..."
+        swapoff /swapfile > /dev/null 2>&1
+        rm -f /swapfile > /dev/null 2>&1
+        sed -i '/swapfile/d' /etc/fstab > /dev/null 2>&1
+        echo "✓ 现有 Swap 已移除。"
+        
+        echo ">> 正在创建 ${swap_size_mb} MB 的新 Swap 文件..."
+        swap_file_path="/swapfile"
+        
+        fallocate -l ${swap_size_mb}M $swap_file_path
+        chmod 600 $swap_file_path
+        mkswap $swap_file_path > /dev/null
+        swapon $swap_file_path
+        
+        if ! grep -q "$swap_file_path" /etc/fstab; then
+            echo "$swap_file_path none swap sw 0 0" >> /etc/fstab
+        fi
+        
+        sysctl vm.swappiness=10 > /dev/null
+        if ! grep -q "vm.swappiness=10" /etc/sysctl.conf; then
+            echo "vm.swappiness=10" >> /etc/sysctl.conf
+        fi
+        
+        echo "✓ Swap 交换分区创建完成。"
+    else
+        echo "检测到系统已有 ${existing_swap} MB 的 Swap，大小已优化，跳过创建。"
+    fi
 else
-    total_ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    total_ram_mb=$((total_ram_kb / 1024))
-    recommended_swap=$((total_ram_mb * 2))
-    
+    # 原始逻辑：如果不存在Swap，直接创建
     echo "当前 VPS 的物理内存 (RAM) 为：${total_ram_mb} MB"
     echo "建议创建 Swap 大小：${recommended_swap} MB (RAM 的 2 倍)"
     echo ""
@@ -233,26 +287,23 @@ else
     echo ">> 正在创建 ${swap_size_mb} MB 的 Swap 文件..."
     swap_file_path="/swapfile"
     
-    # 创建swap文件
     fallocate -l ${swap_size_mb}M $swap_file_path
     chmod 600 $swap_file_path
     mkswap $swap_file_path > /dev/null
     swapon $swap_file_path
     
-    # 添加到fstab使其永久生效
     if ! grep -q "$swap_file_path" /etc/fstab; then
         echo "$swap_file_path none swap sw 0 0" >> /etc/fstab
     fi
     
-    # 设置swappiness
     sysctl vm.swappiness=10 > /dev/null
     if ! grep -q "vm.swappiness=10" /etc/sysctl.conf; then
         echo "vm.swappiness=10" >> /etc/sysctl.conf
     fi
     
     echo "✓ Swap 交换分区创建完成。"
-    echo "当前 Swap 大小：$(free -m | grep "Swap:" | awk '{print $2}') MB"
 fi
+echo "当前 Swap 大小：$(free -m | grep "Swap:" | awk '{print $2}') MB"
 
 # 步骤 7: 修改 SSH 端口
 echo "---"
@@ -336,6 +387,8 @@ else
 fi
 
 # 创建 jail.local 配置文件
+# NOTE: 修复问题一。移除对日志路径的硬编码，并设置后端为自动检测，
+# 以兼容更多系统环境（例如 systemd 日志）。
 cat <<EOF > /etc/fail2ban/jail.local
 [DEFAULT]
 # 封禁时间：1天
@@ -360,7 +413,7 @@ mta = sendmail
 enabled = true
 port = $ssh_port
 filter = sshd
-logpath = /var/log/auth.log
+backend = auto
 maxretry = 3
 findtime = 600
 bantime = 3600
@@ -389,16 +442,16 @@ echo "---"
 echo ">> [8/8] 配置完成！"
 echo "---"
 echo "✅ 配置总结："
-echo "   - 系统已更新并安装常用软件"
-echo "   - 时区已设置为 Asia/Shanghai"
-echo "   - 系统已启用 BBR 拥塞控制和性能优化"
-echo "   - Swap 交换分区已配置"
+echo "    - 系统已更新并安装常用软件"
+echo "    - 时区已设置为 Asia/Shanghai"
+echo "    - 系统已启用 BBR 拥塞控制和性能优化"
+echo "    - Swap 交换分区已配置"
 if [[ "$modify_ssh" == "y" || "$modify_ssh" == "Y" ]]; then
-    echo "   - SSH 端口已修改为 $new_port"
+    echo "    - SSH 端口已修改为 $new_port"
 else
-    echo "   - SSH 端口保持为 $current_port"
+    echo "    - SSH 端口保持为 $current_port"
 fi
-echo "   - Fail2ban 已安装并配置完成"
+echo "    - Fail2ban 已安装并配置完成"
 echo ""
 echo "🎉 VPS 配置完成！建议重启系统以确保所有设置生效。"
 echo "---"

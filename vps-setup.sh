@@ -1,6 +1,6 @@
 #!/bin/bash
 # VPS 初始化极简版
-# 版本: v3.9 (Ubuntu专用精简版, 移除TCP调优)
+# 版本: v3.10 (Ubuntu专用精简版, 修复Nginx安装)
 # 适用系统: Ubuntu
 
 # 颜色
@@ -94,14 +94,18 @@ setup_timezone() {
 # 安装最新版 Nginx
 install_nginx() {
     echo -e "${YELLOW}正在通过官方源安装最新版 Nginx...${PLAIN}"
+    
+    # 移除旧的Nginx APT源配置文件，防止格式错误
+    rm -f /etc/apt/sources.list.d/nginx.list
+    
     # 下载并添加 Nginx 签名密钥
     curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
     
     # 获取系统代号
     UBUNTU_CODENAME=$(lsb_release -cs)
     
-    # 添加 Nginx APT 源，格式更严谨
-    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${UBUNTU_CODENAME}/ nginx" | tee /etc/apt/sources.list.d/nginx.list
+    # 添加 Nginx APT 源，使用正确的格式
+    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/ubuntu ${UBUNTU_CODENAME} nginx" | tee /etc/apt/sources.list.d/nginx.list
     
     # 更新并安装 Nginx
     apt update -y
@@ -133,7 +137,7 @@ full_setup() {
 # 菜单
 while true; do
     clear
-    echo -e "${GREEN}====== VPS 初始化精简版 v3.9 (Ubuntu) ======${PLAIN}"
+    echo -e "${GREEN}====== VPS 初始化精简版 v3.10 (Ubuntu) ======${PLAIN}"
     echo "1. 一键完整配置（推荐）"
     echo "2. 配置 Swap 交换分区"
     echo "3. SSH 安全端口配置"

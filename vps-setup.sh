@@ -1,7 +1,7 @@
 #!/bin/bash
 # VPS 初始化极简版
-# 版本: v3.7 (无UFW)
-# 适用系统: Debian / Ubuntu / CentOS
+# 版本: v3.9 (Ubuntu专用精简版)
+# 适用系统: Ubuntu
 
 # 颜色
 GREEN="\033[32m"
@@ -15,26 +15,8 @@ PLAIN="\033[0m"
 # 安装常用工具
 install_base() {
     echo -e "${YELLOW}正在安装常用工具...${PLAIN}"
-    if [[ -f /etc/debian_version ]]; then
-        # Debian/Ubuntu
-        apt update -y
-        apt install -y curl wget vim fail2ban iperf3
-    elif [[ -f /etc/redhat-release ]]; then
-        # CentOS
-        yum install -y epel-release
-        yum install -y curl wget vim fail2ban
-    fi
-}
-
-# TCP 调优（只保留 BBR + FQ）
-enable_bbr_fq() {
-    echo -e "${YELLOW}开启 BBR + FQ...${PLAIN}"
-    modprobe tcp_bbr
-    echo "tcp_bbr" >> /etc/modules-load.d/modules.conf
-    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    sysctl -p
-    echo -e "${GREEN}BBR + FQ 已启用！${PLAIN}"
+    apt update -y
+    apt install -y curl wget vim fail2ban iperf3 lsb-release gnupg2
 }
 
 # 配置 Swap（自动判断并设置两倍RAM大小）
@@ -56,7 +38,7 @@ setup_swap() {
         echo -e "${YELLOW}未检测到 Swap 分区，将自动创建 ${SWAP_DESIRED_G}G Swap...${PLAIN}"
     else
         echo -e "${YELLOW}已检测到 Swap 分区，大小为 ${SWAP_CURRENT_MB}MB...${PLAIN}"
-        # 检查是否满足期望大小
+        
         if [[ $SWAP_CURRENT_MB -eq $SWAP_DESIRED_MB || $SWAP_CURRENT_MB -gt $SWAP_DESIRED_MB ]]; then
             echo -e "${GREEN}Swap 大小 (${SWAP_CURRENT_MB}MB) 满足或大于期望值 (${SWAP_DESIRED_MB}MB)，跳过配置。${PLAIN}"
             return 0
@@ -98,34 +80,49 @@ setup_ssh() {
     read -p "请输入新的 SSH 端口（建议 1024-65535）: " sshport
     sed -i "s/^#Port.*/Port $sshport/" /etc/ssh/sshd_config
     sed -i "s/^Port.*/Port $sshport/" /etc/ssh/sshd_config
-    
-    # 兼容不同的系统服务名
-    if [[ -f /etc/debian_version ]]; then
-        systemctl restart sshd
-    elif [[ -f /etc/redhat-release ]]; then
-        systemctl restart sshd
-    fi
+    systemctl restart sshd
     echo -e "${GREEN}SSH 端口已修改为 $sshport。${PLAIN}"
 }
+
+# 配置时区为上海
+setup_timezone() {
+    echo -e "${YELLOW}正在设置时区为亚洲/上海...${PLAIN}"
+    timedatectl set-timezone Asia/Shanghai
+    echo -e "${GREEN}时区已成功设置为 Asia/Shanghai。${PLAIN}"
+}
+
+# 安装最新版 Nginx
+install_nginx() {
+    echo -e "${YELLOW}正在通过官方源安装最新版 Nginx...${PLAIN}"
+    # 下载并添加 Nginx 签名密钥
+    curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
+    # 添加 Nginx APT 源
+    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/$(lsb_release -cs)/ nginx" | tee /etc/apt/sources.list.d/nginx.list
+    # 更新并安装 Nginx
+    apt update -y
+    apt install -y nginx
+    # 启动 Nginx
+    systemctl start nginx
+    systemctl enable nginx
+    echo -e "${GREEN}Nginx 安装和启动已完成！${PLAIN}"
+}
+
 
 # 一键完整配置
 full_setup() {
     install_base
-    enable_bbr_fq
-    setup_swap # 调用新版swap函数
+    setup_timezone
+    setup_swap
     setup_ssh
-    
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable fail2ban --now
-    fi
-    
+    install_nginx
+    systemctl enable fail2ban --now
     echo -e "${GREEN}一键配置完成！${PLAIN}"
 }
 
 # 菜单
 while true; do
     clear
-    echo -e "${GREEN}====== VPS 初始化极简版 ======${PLAIN}"
+    echo -e "${GREEN}====== VPS 初始化精简版 v3.9 (Ubuntu) ======${PLAIN}"
     echo "1. 一键完整配置（推荐）"
     echo "2. 配置 Swap 交换分区"
     echo "3. SSH 安全端口配置"

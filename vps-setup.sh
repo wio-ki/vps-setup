@@ -1,6 +1,6 @@
 #!/bin/bash
 # VPS 初始化极简版
-# 版本: v3.9 (Ubuntu专用精简版)
+# 版本: v3.9 (Ubuntu专用精简版, 移除TCP调优)
 # 适用系统: Ubuntu
 
 # 颜色
@@ -96,15 +96,26 @@ install_nginx() {
     echo -e "${YELLOW}正在通过官方源安装最新版 Nginx...${PLAIN}"
     # 下载并添加 Nginx 签名密钥
     curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
-    # 添加 Nginx APT 源
-    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/$(lsb_release -cs)/ nginx" | tee /etc/apt/sources.list.d/nginx.list
+    
+    # 获取系统代号
+    UBUNTU_CODENAME=$(lsb_release -cs)
+    
+    # 添加 Nginx APT 源，格式更严谨
+    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${UBUNTU_CODENAME}/ nginx" | tee /etc/apt/sources.list.d/nginx.list
+    
     # 更新并安装 Nginx
     apt update -y
     apt install -y nginx
-    # 启动 Nginx
-    systemctl start nginx
-    systemctl enable nginx
-    echo -e "${GREEN}Nginx 安装和启动已完成！${PLAIN}"
+    
+    # 检查 Nginx 是否成功安装，如果成功则启动服务
+    if command -v nginx >/dev/null 2>&1; then
+        # 启动 Nginx
+        systemctl start nginx
+        systemctl enable nginx
+        echo -e "${GREEN}Nginx 安装和启动已完成！${PLAIN}"
+    else
+        echo -e "${RED}Nginx 安装失败，请手动检查。${PLAIN}"
+    fi
 }
 
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # VPS 初始化极简版
-# 版本: v3.6-swap-enhanced
+# 版本: v3.7 (无UFW)
 # 适用系统: Debian / Ubuntu / CentOS
 
 # 颜色
@@ -18,13 +18,11 @@ install_base() {
     if [[ -f /etc/debian_version ]]; then
         # Debian/Ubuntu
         apt update -y
-        apt install -y curl wget vim ufw fail2ban iperf3
+        apt install -y curl wget vim fail2ban iperf3
     elif [[ -f /etc/redhat-release ]]; then
         # CentOS
         yum install -y epel-release
         yum install -y curl wget vim fail2ban
-        # CentOS默认没有ufw，这里不安装
-        # 注意：CentOS的防火墙通常是firewalld或iptables
     fi
 }
 
@@ -104,36 +102,21 @@ setup_ssh() {
     # 兼容不同的系统服务名
     if [[ -f /etc/debian_version ]]; then
         systemctl restart sshd
-        # UFW放行新端口
-        ufw allow $sshport/tcp
     elif [[ -f /etc/redhat-release ]]; then
         systemctl restart sshd
-        # CentOS使用firewalld
-        # firewalld命令示例
-        # firewall-cmd --zone=public --add-port=$sshport/tcp --permanent
-        # firewall-cmd --reload
     fi
-    echo -e "${GREEN}SSH 端口已修改为 $sshport 并放行防火墙！${PLAIN}"
+    echo -e "${GREEN}SSH 端口已修改为 $sshport。${PLAIN}"
 }
 
 # 一键完整配置
 full_setup() {
     install_base
     enable_bbr_fq
-    setup_swap # 调用新版swap函数，无需手动输入
+    setup_swap # 调用新版swap函数
     setup_ssh
     
     if command -v systemctl >/dev/null 2>&1; then
         systemctl enable fail2ban --now
-    fi
-    
-    # UFW防火墙配置
-    if command -v ufw >/dev/null 2>&1; then
-        echo -e "${YELLOW}配置 UFW 防火墙...${PLAIN}"
-        ufw enable
-        ufw default deny incoming
-        ufw default allow outgoing
-        ufw reload
     fi
     
     echo -e "${GREEN}一键配置完成！${PLAIN}"

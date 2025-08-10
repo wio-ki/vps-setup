@@ -1,6 +1,6 @@
 #!/bin/bash
 # VPS 初始化极简版
-# 版本: v3.10 (Ubuntu专用精简版, 修复Nginx安装)
+# 版本: v3.10 (Ubuntu专用精简版, 修复Nginx安装, 增加站点目录配置)
 # 适用系统: Ubuntu
 
 # 颜色
@@ -91,6 +91,23 @@ setup_timezone() {
     echo -e "${GREEN}时区已成功设置为 Asia/Shanghai。${PLAIN}"
 }
 
+# 新增函数: 配置Nginx站点目录
+setup_nginx_config() {
+    echo -e "${YELLOW}正在配置Nginx站点目录结构...${PLAIN}"
+    # 创建站点配置文件目录
+    mkdir -p /etc/nginx/sites-available
+    mkdir -p /etc/nginx/sites-enabled
+
+    # 检查并修改Nginx主配置文件
+    NGINX_CONF="/etc/nginx/nginx.conf"
+    if ! grep -q "include /etc/nginx/sites-enabled/\*;" "$NGINX_CONF"; then
+        sed -i '/http {/a \\tinclude /etc/nginx/sites-enabled/\*;' "$NGINX_CONF"
+        echo -e "${GREEN}Nginx主配置文件已更新，添加了sites-enabled目录的include。${PLAIN}"
+    else
+        echo -e "${GREEN}Nginx主配置文件已包含sites-enabled目录的include，无需修改。${PLAIN}"
+    fi
+}
+
 # 安装最新版 Nginx
 install_nginx() {
     echo -e "${YELLOW}正在通过官方源安装最新版 Nginx...${PLAIN}"
@@ -111,8 +128,11 @@ install_nginx() {
     apt update -y
     apt install -y nginx
     
-    # 检查 Nginx 是否成功安装，如果成功则启动服务
+    # 检查 Nginx 是否成功安装
     if command -v nginx >/dev/null 2>&1; then
+        # 调用新函数来配置目录
+        setup_nginx_config
+        
         # 启动 Nginx
         systemctl start nginx
         systemctl enable nginx

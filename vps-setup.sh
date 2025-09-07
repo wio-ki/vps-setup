@@ -1,7 +1,7 @@
 #!/bin/bash
 # VPS 初始化极简版
-# 版本: v3.11 (Ubuntu专用精简版, 增加无Nginx选项)
-# 适用系统: Ubuntu
+# 版本: v3.12 (Ubuntu/Debian通用精简版, 增加无Nginx选项)
+# 适用系统: Ubuntu / Debian
 
 # 颜色
 GREEN="\033[32m"
@@ -11,6 +11,18 @@ PLAIN="\033[0m"
 
 # 检查 root
 [[ $EUID -ne 0 ]] && echo -e "${RED}请使用 root 用户运行此脚本！${PLAIN}" && exit 1
+
+# 检测系统
+check_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        CODENAME=$VERSION_CODENAME
+    else
+        echo -e "${RED}无法检测系统类型！${PLAIN}"
+        exit 1
+    fi
+}
 
 # 安装常用工具
 install_base() {
@@ -24,10 +36,10 @@ setup_swap() {
     MEM_TOTAL_MB=$(free -m | awk '/^Mem:/ {print $2}')
     SWAP_DESIRED_MB=$((MEM_TOTAL_MB * 2))
     SWAP_DESIRED_G=$(( (SWAP_DESIRED_MB + 1023) / 1024 ))
-    
+
     echo -e "${YELLOW}正在检查 Swap 交换分区...${PLAIN}"
     SWAP_CURRENT_MB=$(free -m | awk '/^Swap:/ {print $2}')
-    
+
     if [[ $SWAP_CURRENT_MB -eq 0 ]]; then
         echo -e "${YELLOW}未检测到 Swap，将创建 ${SWAP_DESIRED_G}G...${PLAIN}"
     else
@@ -84,13 +96,21 @@ setup_nginx_config() {
     echo -e "${GREEN}Nginx站点目录配置完成。${PLAIN}"
 }
 
-# 安装最新版 Nginx
+# 安装最新版 Nginx (Ubuntu / Debian 自动适配)
 install_nginx() {
     echo -e "${YELLOW}正在安装最新版 Nginx...${PLAIN}"
     rm -f /etc/apt/sources.list.d/nginx.list
     curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
-    UBUNTU_CODENAME=$(lsb_release -cs)
-    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/ubuntu ${UBUNTU_CODENAME} nginx" | tee /etc/apt/sources.list.d/nginx.list
+
+    if [[ $OS == "ubuntu" ]]; then
+        echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/ubuntu ${CODENAME} nginx" | tee /etc/apt/sources.list.d/nginx.list
+    elif [[ $OS == "debian" ]]; then
+        echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/debian ${CODENAME} nginx" | tee /etc/apt/sources.list.d/nginx.list
+    else
+        echo -e "${RED}不支持的系统: $OS${PLAIN}"
+        exit 1
+    fi
+
     apt update -y
     apt install -y nginx
     if command -v nginx >/dev/null 2>&1; then
@@ -123,10 +143,11 @@ full_setup_without_nginx() {
     echo -e "${GREEN}一键配置完成（不含Nginx）！${PLAIN}"
 }
 
-# 菜单
+# 主菜单
+check_os
 while true; do
     clear
-    echo -e "${GREEN}====== VPS 初始化精简版 v3.11 (Ubuntu) ======${PLAIN}"
+    echo -e "${GREEN}====== VPS 初始化精简版 v3.12 (${OS^}) ======${PLAIN}"
     echo "1. 一键完整配置（含Nginx，推荐）"
     echo "2. 配置 Swap 交换分区"
     echo "3. SSH 安全端口配置"

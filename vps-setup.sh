@@ -134,11 +134,6 @@ services:
       - /data_back/nginx/ssl:/data_back/nginx/ssl:ro
     command: -D /etc/sing-box/data -C /etc/sing-box/ run
 YAML
-
-    cd /data_back/compose/sing-box
-    docker compose pull
-    docker compose up -d
-    ok "sing-box 安装并已启动"
 }
 
 # =============================================================================

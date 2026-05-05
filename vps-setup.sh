@@ -10,6 +10,7 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 APT_OPTS="-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+AUTO_REBOOT="${AUTO_REBOOT:-1}"
 
 # ── 颜色输出 ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -21,11 +22,19 @@ die()   { echo -e "${RED}[ERR ]${NC}  $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "请以 root 身份运行此脚本"
 
-# ── 全程记录日志 ──────────────────────────────────────────────────────────────
+# ── 全程记录日志，同时保留终端完整输出 ─────────────────────────────────────────
 mkdir -p /data_back/scripts
 LOG_FILE=/data_back/scripts/install-$(date +%Y%m%d-%H%M%S).log
 exec > >(tee -a "$LOG_FILE") 2>&1
 info "安装日志保存至：$LOG_FILE"
+info "终端输出与日志已同步记录，脚本结束前不会主动清空屏幕"
+
+cleanup_and_flush() {
+    local exit_code=$?
+    sync || true
+    return "$exit_code"
+}
+trap cleanup_and_flush EXIT
 
 # ── 确认 Debian 12 ────────────────────────────────────────────────────────────
 source /etc/os-release
@@ -55,10 +64,9 @@ Port 61692
 ClientAliveInterval 60
 ClientAliveCountMax 10
 EOF
-    # 验证配置再 reload，避免改坏了锁死自己
+    # 验证配置但不 reload，避免当前 SSH 会话中途断开；最终 reboot 后生效
     sshd -t || die "sshd_config 语法错误，已中止"
-    systemctl reload sshd
-    ok "SSH 端口已改为 61692，keepalive 60s × 10次"
+    ok "SSH 端口配置已写入 61692，重启后生效"
     warn "下次登录请用：ssh root@<IP> -p 61692"
 }
 
@@ -315,9 +323,15 @@ SYSCTL
     echo -e "${YELLOW}  安装日志已保存至：$LOG_FILE${NC}"
     echo -e "${YELLOW}  VPS 将在 10 秒后自动重启...${NC}"
     echo -e "${YELLOW}  重启后请用新端口登录：ssh root@<IP> -p 61692${NC}"
+    echo -e "${YELLOW}  说明：终端已完整显示所有输出，日志也同步写入文件${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    sync || true
     sleep 10
-    reboot
+    if [[ "$AUTO_REBOOT" == "1" ]]; then
+        systemctl reboot
+    else
+        warn "AUTO_REBOOT=0，已跳过重启"
+    fi
 }
 
 # =============================================================================

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  VPS 初始化脚本 — Debian 12 专用
+#  VPS 初始化脚本 — Debian 12 / 13
 #  场景：nginx 443 反代后端容器（127.0.0.1:port），无 ufw
 #  目录规范：所有数据统一存放于 /data_back/
 #  执行方式：
-#    curl -fsSL https://raw.githubusercontent.com/wio-ki/vps-setup/main/vps-setup.sh | tr -d '\r' | bash
+#    curl -fsSL https://raw.githubusercontent.com/wio-ki/vps-setup/main/vps-setup.sh | bash
 # =============================================================================
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
-APT_OPTS="-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
-AUTO_REBOOT="${AUTO_REBOOT:-1}"
+APT_OPTS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+AUTO_REBOOT="${AUTO_REBOOT:-0}"
 
 # ── 颜色输出 ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -27,15 +27,6 @@ mkdir -p /data_back/scripts
 LOG_FILE=/data_back/scripts/install-$(date +%Y%m%d-%H%M%S).log
 exec > >(tee -a "$LOG_FILE") 2>&1
 info "安装日志保存至：$LOG_FILE"
-info "终端输出与日志已同步记录，脚本结束前不会主动清空屏幕"
-
-cleanup_and_flush() {
-    local exit_code=$?
-    sync || true
-    return "$exit_code"
-}
-trap cleanup_and_flush EXIT
-
 # ── 确认 Debian 系统 ────────────────────────────────────────────────────────────
 source /etc/os-release
 [[ "$ID" == "debian" && ( "$VERSION_ID" == "12" || "$VERSION_ID" == "13" ) ]] \
@@ -47,25 +38,33 @@ source /etc/os-release
 section_1() {
     info "━━━ [1/8] 更新系统软件包 & 配置 SSH ━━━"
     apt-get update -y
-    apt-get -y $APT_OPTS upgrade
-    apt-get -y $APT_OPTS install \
-        sudo curl wget nano gnupg2 ca-certificates \
-        lsb-release debian-archive-keyring apt-transport-https \
-        openssl unzip socat cron
+    apt-get -y "${APT_OPTS[@]}" upgrade
+    apt-get -y "${APT_OPTS[@]}" --no-install-recommends install \
+        curl ca-certificates gpg openssh-server procps util-linux
     ok "系统更新 & 基础工具安装完成"
 
     info "配置 SSH 端口 → 61692 & keepalive..."
-    SSHD_CONF=/etc/ssh/sshd_config
-    sed -i "/^#*Port /d"              "$SSHD_CONF"
-    sed -i "/^ClientAliveInterval/d"  "$SSHD_CONF"
-    sed -i "/^ClientAliveCountMax/d"  "$SSHD_CONF"
-    cat >> "$SSHD_CONF" <<'EOF'
-Port 61692
-ClientAliveInterval 60
-ClientAliveCountMax 10
-EOF
-    # 验证配置但不 reload，避免当前 SSH 会话中途断开；最终 reboot 后生效
-    sshd -t || die "sshd_config 语法错误，已中止"
+    local conf=/etc/ssh/sshd_config candidate
+    candidate=$(mktemp /etc/ssh/sshd_config.XXXXXX)
+    # 全局选项必须位于第一个 Match 之前，保留用户的条件配置。
+    awk '
+        BEGIN { print "Port 61692\nClientAliveInterval 60\nClientAliveCountMax 10" }
+        tolower($1) == "match" { conditional = 1 }
+        !conditional && tolower($1) ~ /^(port|clientaliveinterval|clientalivecountmax)$/ { next }
+        { print }
+    ' "$conf" > "$candidate"
+    if ! sshd -t -f "$candidate"; then
+        rm -f "$candidate"
+        die "SSH 配置验证失败，原文件已保留"
+    fi
+    chmod --reference="$conf" "$candidate"
+    chown --reference="$conf" "$candidate"
+    if cmp -s "$conf" "$candidate"; then
+        rm -f "$candidate"
+    else
+        [[ -e "$conf.before-vps-setup" ]] || cp -a "$conf" "$conf.before-vps-setup"
+        mv -f "$candidate" "$conf"
+    fi
     ok "SSH 端口配置已写入 61692，重启后生效"
     warn "下次登录请用：ssh root@<IP> -p 61692"
 }
@@ -96,8 +95,11 @@ section_3() {
 section_4() {
     info "━━━ [4/8] 安装 Docker ━━━"
 
-    apt-get remove -y docker.io docker-compose docker-doc podman-docker \
-        containerd runc 2>/dev/null || true
+    if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
+        systemctl enable --now docker
+        ok "Docker 和 Compose 已安装"
+        return
+    fi
 
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/debian/gpg \
@@ -110,9 +112,9 @@ https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
         | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
     apt-get update -y
-    apt-get -y $APT_OPTS install \
+    apt-get -y "${APT_OPTS[@]}" --no-install-recommends install \
         docker-ce docker-ce-cli containerd.io \
-        docker-buildx-plugin docker-compose-plugin
+        docker-compose-plugin
 
     systemctl enable docker
     systemctl start docker
@@ -129,8 +131,15 @@ section_5() {
     info "━━━ [5/8] 安装 sing-box（docker compose）━━━"
 
     mkdir -p /data_back/compose/sing-box/data
-    : > /data_back/compose/sing-box/config.json
-    cat > /data_back/compose/sing-box/docker-compose.yml <<'YAML'
+    local dir=/data_back/compose/sing-box
+    if [[ ! -e "$dir/config.json" ]]; then
+        printf '{}\n' > "$dir/config.json"
+    fi
+    if [[ -e "$dir/docker-compose.yml" ]]; then
+        ok "保留现有 sing-box Compose 配置"
+        return
+    fi
+    cat > "$dir/docker-compose.yml" <<'YAML'
 services:
   sing-box:
     image: ghcr.io/sagernet/sing-box
@@ -151,6 +160,12 @@ YAML
 section_6() {
     info "━━━ [6/8] 安装 Nginx（官方稳定版）━━━"
 
+    if [[ -f /etc/nginx/nginx.conf ]]; then
+        nginx -t || die "现有 Nginx 配置未通过验证"
+        systemctl enable --now nginx
+        ok "保留现有 Nginx 主配置和站点"
+        return
+    fi
     curl -fsSL https://nginx.org/keys/nginx_signing.key \
         | gpg --dearmor \
         | tee /usr/share/keyrings/nginx-archive-keyring.gpg > /dev/null
@@ -162,16 +177,15 @@ https://nginx.org/packages/debian ${VERSION_CODENAME} nginx" \
     # 优先使用 nginx.org 官方包，防止被 Debian 默认包覆盖
     cat > /etc/apt/preferences.d/99nginx <<'EOF'
 Package: *
-Pin: origin nginx.org
 Pin: release o=nginx
 Pin-Priority: 900
 EOF
 
     apt-get update -y
-    apt-get -y $APT_OPTS install nginx
+    apt-get -y "${APT_OPTS[@]}" install nginx
     nginx -v
 
-    cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.orig
+    [[ -e /etc/nginx/nginx.conf.orig ]] || cp -a /etc/nginx/nginx.conf /etc/nginx/nginx.conf.orig
     mkdir -p /data_back/nginx/{conf.d,ssl,logs}
 
     # ── 写 nginx.conf ──────────────────────────────────────────────────────────
@@ -263,7 +277,7 @@ NGINXCONF
 section_7() {
     info "━━━ [7/8] 配置 Swap ━━━"
 
-    if swapon --show | grep -q '/'; then
+    if [[ -n "$(swapon --show=NAME --noheadings)" ]]; then
         warn "已存在 swap，跳过：$(swapon --show)"
         return
     fi
@@ -280,6 +294,7 @@ section_7() {
     fi
 
     SWAP_FILE=/swapfile
+    [[ ! -e "$SWAP_FILE" ]] || die "已有未启用的 $SWAP_FILE，请先检查其用途"
     # fallocate 在 btrfs 等 CoW 文件系统上会失败，fallback 到 dd
     fallocate -l "${SWAP_MB}M" "$SWAP_FILE" 2>/dev/null \
         || dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$SWAP_MB" status=progress
@@ -318,19 +333,13 @@ SYSCTL
     nginx -t || die "nginx 配置有误，已中止重启，请检查后手动 reboot"
     sshd -t  || die "sshd 配置有误，已中止重启，请检查后手动 reboot"
 
-    echo ""
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}  安装日志已保存至：$LOG_FILE${NC}"
-    echo -e "${YELLOW}  VPS 将在 10 秒后自动重启...${NC}"
-    echo -e "${YELLOW}  重启后请用新端口登录：ssh root@<IP> -p 61692${NC}"
-    echo -e "${YELLOW}  说明：终端已完整显示所有输出，日志也同步写入文件${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    sync || true
-    sleep 10
-    if [[ "$AUTO_REBOOT" == "1" ]]; then
+    ok "安装日志已保存至 $LOG_FILE"
+    if [[ "$AUTO_REBOOT" == 1 ]]; then
+        warn "将在 10 秒后重启，下次登录请使用 SSH 端口 61692"
+        sleep 10
         systemctl reboot
     else
-        warn "AUTO_REBOOT=0，已跳过重启"
+        ok "初始化完成。SSH 配置将在下次重启后生效，请先放行 TCP 61692。"
     fi
 }
 
@@ -340,7 +349,7 @@ SYSCTL
 main() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║         VPS 初始化脚本  —  Debian 12  —  /data_back/        ║${NC}"
+    echo -e "${CYAN}║         VPS 初始化脚本  —  Debian 12/13 —  /data_back/        ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
